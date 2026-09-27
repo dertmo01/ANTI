@@ -684,7 +684,19 @@ setArVisual("off","OFF")
 -- ======================================================
 local AutoFarmEnabled = false
 local AutoFarmRunning = false
-local SelectedEggType = "Cosmic"  -- Options: "Secret", "Eternal", "Divine", "Cosmic"
+
+-- Track selected eggs: { [eggUid] = true/false, ... }
+local SelectedEggs = {}
+local AllScannedEggs = {}  -- Cache of all eggs found
+
+-- Rarity order (for display priority)
+local RARITY_ORDER = { "Cosmic", "Divine", "Eternal", "Secret" }
+local RARITY_COLORS = {
+    ["Cosmic"]  = Color3.fromRGB(220, 100, 255),  -- Purple
+    ["Divine"]  = Color3.fromRGB(255, 215, 0),   -- Gold
+    ["Eternal"] = Color3.fromRGB(100, 200, 255), -- Blue
+    ["Secret"]  = Color3.fromRGB(100, 255, 150), -- Green
+}
 
 -- Auto Farm card
 local afCard=Instance.new("TextButton")
@@ -735,87 +747,87 @@ local function setAfVisual(state, txt)
     if txt then afStatus.Text = txt end
 end
 
-local function findEggsByType(eggType)
-    -- Standalone egg finder — scans AreaEggSlotsClient without YOKODU dependency
+-- Scan eggs and detect their rarity
+local function scanAndDetectEggs()
+    AllScannedEggs = {}
     local container = workspace:FindFirstChild("AreaEggSlotsClient")
     if not container then
         log("AutoFarm: AreaEggSlotsClient not found!", LOG_ERR)
-        return {}
+        return
     end
-
-    local eggList = {}
-    local typeKeywords = {
-        ["Secret"]  = { "secret", "shadowfirered", "mistical" },
-        ["Eternal"] = { "eternal", "timeless", "infinity" },
-        ["Divine"]  = { "divine", "deity", "godly", "celestial" },
-        ["Cosmic"]  = { "cosmic", "astral", "universal", "space" }
-    }
-    
-    local keywords = typeKeywords[eggType] or {}
 
     for _, child in ipairs(container:GetChildren()) do
         if child:IsA("Model") then
-            -- Try to match type by name first
-            local childNameLower = child.Name:lower()
-            local matchesType = false
+            local eggName = child.Name
+            local rarity = "Secret"  -- default fallback
             
-            for _, keyword in ipairs(keywords) do
-                if string.find(childNameLower, keyword) then
-                    matchesType = true
-                    break
+            -- Try to detect rarity from model attributes or structure
+            local rareAttr = child:GetAttribute("Rarity") or child:GetAttribute("Tier") or child:GetAttribute("Type")
+            if rareAttr then
+                local rareStr = tostring(rareAttr):lower()
+                for _, r in ipairs(RARITY_ORDER) do
+                    if string.find(rareStr, r:lower()) then
+                        rarity = r
+                        break
+                    end
                 end
-            end
-            
-            -- If no match by name, try checking descendants for type hints
-            if not matchesType then
-                for _, desc in ipairs(child:GetDescendants()) do
-                    if desc:IsA("BasePart") then
-                        local descNameLower = desc.Name:lower()
-                        for _, keyword in ipairs(keywords) do
-                            if string.find(descNameLower, keyword) then
-                                matchesType = true
-                                break
-                            end
-                        end
-                        if matchesType then break end
+            else
+                -- Fallback: check name for rarity keywords
+                local nameLower = eggName:lower()
+                for _, r in ipairs(RARITY_ORDER) do
+                    if string.find(nameLower, r:lower()) then
+                        rarity = r
+                        break
                     end
                 end
             end
 
-            if matchesType then
-                -- Find a valid position for this egg
-                local pos = nil
-                if child.PrimaryPart then
-                    pos = child.PrimaryPart.Position
-                else
-                    for _, c in ipairs(child:GetChildren()) do
-                        if c:IsA("BasePart") then
-                            pos = c.Position
-                            break
-                        end
+            -- Find position
+            local pos = nil
+            if child.PrimaryPart then
+                pos = child.PrimaryPart.Position
+            else
+                for _, c in ipairs(child:GetChildren()) do
+                    if c:IsA("BasePart") then
+                        pos = c.Position
+                        break
                     end
                 end
+            end
 
-                if pos then
-                    table.insert(eggList, {
-                        Id = child.Name,
-                        DisplayName = child.Name,
-                        Model = child,
-                        Position = pos
-                    })
-                end
+            if pos then
+                table.insert(AllScannedEggs, {
+                    Uid = eggName,
+                    Name = eggName,
+                    Rarity = rarity,
+                    Position = pos,
+                    Model = child
+                })
             end
         end
     end
 
-    return eggList
+    -- Sort by rarity (Cosmic > Divine > Eternal > Secret)
+    table.sort(AllScannedEggs, function(a, b)
+        local rareA = table.find(RARITY_ORDER, a.Rarity) or 999
+        local rareB = table.find(RARITY_ORDER, b.Rarity) or 999
+        if rareA ~= rareB then return rareA < rareB end
+        return a.Uid < b.Uid
+    end)
+
+    log("AutoFarm: scanned "..#AllScannedEggs.." eggs", LOG_INFO)
+    return AllScannedEggs
 end
 
 local function stopAutoFarm(reason)
     AutoFarmRunning=false
     log("AutoFarm: STOPPED — "..(reason or "done"),LOG_WARN)
     if AutoFarmEnabled then
-        setAfVisual("on","ON  •  "..SelectedEggType)
+        local count = 0
+        for _, isSelected in pairs(SelectedEggs) do
+            if isSelected then count = count + 1 end
+        end
+        setAfVisual("on","ON  •  "..count.." selected")
     else
         setAfVisual("off","OFF")
     end
@@ -823,21 +835,24 @@ end
 
 local function startAutoFarm()
     if AutoFarmRunning then log("AutoFarm: already running, skip",LOG_WARN); return end
+    
+    -- Count selected eggs
+    local selectedCount = 0
+    for _, isSelected in pairs(SelectedEggs) do
+        if isSelected then selectedCount = selectedCount + 1 end
+    end
+
+    if selectedCount == 0 then
+        log("AutoFarm: no eggs selected!", LOG_WARN)
+        return
+    end
+
     AutoFarmRunning=true
-    log("AutoFarm: START — farming "..SelectedEggType,LOG_OK)
-    setAfVisual("running","Searching for "..SelectedEggType.."...")
+    log("AutoFarm: START — farming "..selectedCount.." selected eggs",LOG_OK)
+    setAfVisual("running","Searching for selected eggs...")
 
     task.spawn(function()
-        -- Scan eggs using standalone detector
-        local eggList = findEggsByType(SelectedEggType)
-        log("AutoFarm: found "..#eggList.." "..SelectedEggType.." eggs", LOG_INFO)
-
-        if #eggList == 0 then
-            log("AutoFarm: no "..SelectedEggType.." eggs found", LOG_WARN)
-            stopAutoFarm("no eggs"); return
-        end
-
-        -- Find closest egg to player
+        -- Find closest selected egg
         local targetEgg = nil
         local targetPos = nil
         local closestDist = 9999
@@ -850,19 +865,21 @@ local function startAutoFarm()
             stopAutoFarm("no character"); return
         end
 
-        for _, egg in ipairs(eggList) do
-            local dist = (egg.Position - root.Position).Magnitude
-            if dist < closestDist then
-                closestDist = dist
-                targetEgg = egg
-                targetPos = egg.Position
-                log("AutoFarm: target = "..egg.DisplayName.." at distance "..math.floor(dist), LOG_INFO)
+        for _, egg in ipairs(AllScannedEggs) do
+            if SelectedEggs[egg.Uid] then
+                local dist = (egg.Position - root.Position).Magnitude
+                if dist < closestDist then
+                    closestDist = dist
+                    targetEgg = egg
+                    targetPos = egg.Position
+                    log("AutoFarm: target = "..egg.Rarity.." '"..egg.Name.."' at distance "..math.floor(dist), LOG_INFO)
+                end
             end
         end
 
         if not targetPos then
-            log("AutoFarm: no valid target found", LOG_ERR)
-            stopAutoFarm("no target"); return
+            log("AutoFarm: no selected eggs in range", LOG_WARN)
+            stopAutoFarm("no selected"); return
         end
 
         log("AutoFarm: running to egg at ("..math.floor(targetPos.X)..","..math.floor(targetPos.Y)..","..math.floor(targetPos.Z)..")", LOG_OK)
@@ -930,8 +947,12 @@ afCard.InputBegan:Connect(function(input)
             AutoFarmEnabled=not AutoFarmEnabled
             log("AutoFarm toggled: "..(AutoFarmEnabled and "ON" or "OFF"), AutoFarmEnabled and LOG_OK or LOG_WARN)
             if AutoFarmEnabled then
-                setAfVisual("on","ON  •  "..SelectedEggType)
-                task.spawn(function() startAutoFarm() end)  -- ← AUTO START when toggled ON
+                local count = 0
+                for _, isSelected in pairs(SelectedEggs) do
+                    if isSelected then count = count + 1 end
+                end
+                setAfVisual("on","ON  •  "..count.." selected")
+                task.spawn(function() startAutoFarm() end)
             else
                 setAfVisual("off","OFF")
             end
@@ -1046,38 +1067,105 @@ arriveDec.Activated:Connect(function() playClick(); ARRIVE_DIST=math.max(4,ARRIV
 arriveInc.Activated:Connect(function() playClick(); ARRIVE_DIST=math.min(50,ARRIVE_DIST+2); arriveVal.Text=ARRIVE_DIST.." studs"; log("ArriveDistance="..ARRIVE_DIST,LOG_INFO) end)
 
 -- Manual trigger button (test without egg)
-cfgLabel("AUTO FARM - Select Egg Type")
-local eggTypeRow=Instance.new("Frame"); eggTypeRow.Size=UDim2.new(1,-8,0,40)
-eggTypeRow.BackgroundTransparency=1; eggTypeRow.Parent=configPage
+cfgLabel("AUTO FARM - Egg Selector")
+local eggSelectorBtn=cfgBtn("📋  Scan & Select Eggs")
+eggSelectorBtn.Activated:Connect(function()
+    playClick()
+    log("=== SCANNING EGGS ===",LOG_INFO)
+    scanAndDetectEggs()
+    
+    if #AllScannedEggs == 0 then
+        log("No eggs found!", LOG_WARN)
+        return
+    end
+    
+    -- Display eggs for selection
+    local eggsByRarity = {}
+    for _, egg in ipairs(AllScannedEggs) do
+        if not eggsByRarity[egg.Rarity] then
+            eggsByRarity[egg.Rarity] = {}
+        end
+        table.insert(eggsByRarity[egg.Rarity], egg)
+    end
+    
+    log("=== AVAILABLE EGGS ===", LOG_INFO)
+    for _, rarity in ipairs(RARITY_ORDER) do
+        if eggsByRarity[rarity] then
+            log(rarity.." ("..#eggsByRarity[rarity]..") — /select "..rarity:lower(), LOG_OK)
+        end
+    end
+    log("Usage: /select cosmic OR /select divine OR /select all", LOG_INFO)
+end)
 
-local secretBtn=Instance.new("TextButton"); secretBtn.Size=UDim2.new(0.24,-2,1,0); secretBtn.Position=UDim2.fromOffset(0,0)
-secretBtn.BackgroundColor3=Themes[1].Panel; secretBtn.BorderSizePixel=0; secretBtn.Text="Secret"
-secretBtn.Font=Enum.Font.FredokaOne; secretBtn.TextSize=9; secretBtn.TextColor3=Color3.new(1,1,1)
-secretBtn.AutoButtonColor=false; secretBtn.Parent=eggTypeRow
-Instance.new("UICorner",secretBtn).CornerRadius=UDim.new(0,7)
+local function selectEggsByRarity(rarity)
+    SelectedEggs = {}
+    local count = 0
+    for _, egg in ipairs(AllScannedEggs) do
+        if rarity:lower() == "all" or egg.Rarity:lower() == rarity:lower() then
+            SelectedEggs[egg.Uid] = true
+            count = count + 1
+        end
+    end
+    if count > 0 then
+        log("Selected "..count.." eggs ("..rarity..")", LOG_OK)
+        setAfVisual("on", "ON  •  "..count.." selected")
+    else
+        log("No eggs found for "..rarity, LOG_WARN)
+    end
+end
 
-local eternalBtn=Instance.new("TextButton"); eternalBtn.Size=UDim2.new(0.24,-2,1,0); eternalBtn.Position=UDim2.new(0.25,2,0,0)
-eternalBtn.BackgroundColor3=Themes[1].Panel; eternalBtn.BorderSizePixel=0; eternalBtn.Text="Eternal"
-eternalBtn.Font=Enum.Font.FredokaOne; eternalBtn.TextSize=9; eternalBtn.TextColor3=Color3.new(1,1,1)
-eternalBtn.AutoButtonColor=false; eternalBtn.Parent=eggTypeRow
-Instance.new("UICorner",eternalBtn).CornerRadius=UDim.new(0,7)
+-- Quick select buttons
+cfgLabel("Quick Select")
+local quickRow = Instance.new("Frame"); quickRow.Size=UDim2.new(1,-8,0,40)
+quickRow.BackgroundTransparency=1; quickRow.Parent=configPage
 
-local divineBtn=Instance.new("TextButton"); divineBtn.Size=UDim2.new(0.24,-2,1,0); divineBtn.Position=UDim2.new(0.5,2,0,0)
-divineBtn.BackgroundColor3=Themes[1].Panel; divineBtn.BorderSizePixel=0; divineBtn.Text="Divine"
-divineBtn.Font=Enum.Font.FredokaOne; divineBtn.TextSize=9; divineBtn.TextColor3=Color3.new(1,1,1)
-divineBtn.AutoButtonColor=false; divineBtn.Parent=eggTypeRow
-Instance.new("UICorner",divineBtn).CornerRadius=UDim.new(0,7)
+local selectAllBtn=Instance.new("TextButton"); selectAllBtn.Size=UDim2.new(0.48,-3,1,0); selectAllBtn.Position=UDim2.fromOffset(0,0)
+selectAllBtn.BackgroundColor3=Color3.fromRGB(50,100,150); selectAllBtn.BorderSizePixel=0; selectAllBtn.Text="✓  ALL"
+selectAllBtn.Font=Enum.Font.FredokaOne; selectAllBtn.TextSize=10; selectAllBtn.TextColor3=Color3.new(1,1,1)
+selectAllBtn.AutoButtonColor=false; selectAllBtn.Parent=quickRow
+Instance.new("UICorner",selectAllBtn).CornerRadius=UDim.new(0,7)
 
-local cosmicBtn=Instance.new("TextButton"); cosmicBtn.Size=UDim2.new(0.24,-2,1,0); cosmicBtn.Position=UDim2.new(0.75,2,0,0)
-cosmicBtn.BackgroundColor3=Themes[1].Panel; cosmicBtn.BorderSizePixel=0; cosmicBtn.Text="Cosmic"
+local clearAllBtn=Instance.new("TextButton"); clearAllBtn.Size=UDim2.new(0.48,-3,1,0); clearAllBtn.Position=UDim2.new(0.52,3,0,0)
+clearAllBtn.BackgroundColor3=Color3.fromRGB(100,50,50); clearAllBtn.BorderSizePixel=0; clearAllBtn.Text="✕  CLEAR"
+clearAllBtn.Font=Enum.Font.FredokaOne; clearAllBtn.TextSize=10; clearAllBtn.TextColor3=Color3.new(1,1,1)
+clearAllBtn.AutoButtonColor=false; clearAllBtn.Parent=quickRow
+Instance.new("UICorner",clearAllBtn).CornerRadius=UDim.new(0,7)
+
+selectAllBtn.Activated:Connect(function() playClick(); selectEggsByRarity("all") end)
+clearAllBtn.Activated:Connect(function() playClick(); SelectedEggs={}; log("All eggs deselected", LOG_INFO); setAfVisual("off","OFF") end)
+
+cfgLabel("By Rarity")
+local rarityRow = Instance.new("Frame"); rarityRow.Size=UDim2.new(1,-8,0,40)
+rarityRow.BackgroundTransparency=1; rarityRow.Parent=configPage
+
+local cosmicBtn=Instance.new("TextButton"); cosmicBtn.Size=UDim2.new(0.24,-2,1,0); cosmicBtn.Position=UDim2.fromOffset(0,0)
+cosmicBtn.BackgroundColor3=RARITY_COLORS["Cosmic"]; cosmicBtn.BorderSizePixel=0; cosmicBtn.Text="Cosmic"
 cosmicBtn.Font=Enum.Font.FredokaOne; cosmicBtn.TextSize=9; cosmicBtn.TextColor3=Color3.new(1,1,1)
-cosmicBtn.AutoButtonColor=false; cosmicBtn.Parent=eggTypeRow
+cosmicBtn.AutoButtonColor=false; cosmicBtn.Parent=rarityRow
 Instance.new("UICorner",cosmicBtn).CornerRadius=UDim.new(0,7)
 
-secretBtn.Activated:Connect(function() playClick(); SelectedEggType="Secret"; log("Egg Type: Secret",LOG_INFO); setAfVisual("on","ON  •  Secret") end)
-eternalBtn.Activated:Connect(function() playClick(); SelectedEggType="Eternal"; log("Egg Type: Eternal",LOG_INFO); setAfVisual("on","ON  •  Eternal") end)
-divineBtn.Activated:Connect(function() playClick(); SelectedEggType="Divine"; log("Egg Type: Divine",LOG_INFO); setAfVisual("on","ON  •  Divine") end)
-cosmicBtn.Activated:Connect(function() playClick(); SelectedEggType="Cosmic"; log("Egg Type: Cosmic",LOG_INFO); setAfVisual("on","ON  •  Cosmic") end)
+local divineBtn=Instance.new("TextButton"); divineBtn.Size=UDim2.new(0.24,-2,1,0); divineBtn.Position=UDim2.new(0.25,2,0,0)
+divineBtn.BackgroundColor3=RARITY_COLORS["Divine"]; divineBtn.BorderSizePixel=0; divineBtn.Text="Divine"
+divineBtn.Font=Enum.Font.FredokaOne; divineBtn.TextSize=9; divineBtn.TextColor3=Color3.new(1,1,1)
+divineBtn.AutoButtonColor=false; divineBtn.Parent=rarityRow
+Instance.new("UICorner",divineBtn).CornerRadius=UDim.new(0,7)
+
+local eternalBtn=Instance.new("TextButton"); eternalBtn.Size=UDim2.new(0.24,-2,1,0); eternalBtn.Position=UDim2.new(0.5,2,0,0)
+eternalBtn.BackgroundColor3=RARITY_COLORS["Eternal"]; eternalBtn.BorderSizePixel=0; eternalBtn.Text="Eternal"
+eternalBtn.Font=Enum.Font.FredokaOne; eternalBtn.TextSize=9; eternalBtn.TextColor3=Color3.new(1,1,1)
+eternalBtn.AutoButtonColor=false; eternalBtn.Parent=rarityRow
+Instance.new("UICorner",eternalBtn).CornerRadius=UDim.new(0,7)
+
+local secretBtn=Instance.new("TextButton"); secretBtn.Size=UDim2.new(0.24,-2,1,0); secretBtn.Position=UDim2.new(0.75,2,0,0)
+secretBtn.BackgroundColor3=RARITY_COLORS["Secret"]; secretBtn.BorderSizePixel=0; secretBtn.Text="Secret"
+secretBtn.Font=Enum.Font.FredokaOne; secretBtn.TextSize=9; secretBtn.TextColor3=Color3.new(1,1,1)
+secretBtn.AutoButtonColor=false; secretBtn.Parent=rarityRow
+Instance.new("UICorner",secretBtn).CornerRadius=UDim.new(0,7)
+
+cosmicBtn.Activated:Connect(function() playClick(); selectEggsByRarity("cosmic") end)
+divineBtn.Activated:Connect(function() playClick(); selectEggsByRarity("divine") end)
+eternalBtn.Activated:Connect(function() playClick(); selectEggsByRarity("eternal") end)
+secretBtn.Activated:Connect(function() playClick(); selectEggsByRarity("secret") end)
 
 cfgLabel("DEBUG")
 local testBtn=cfgBtn("▶  Trigger Auto Run NOW (test)")
@@ -1103,6 +1191,42 @@ scanBtn.Activated:Connect(function()
     -- log character position
     local char=Player.Character; local root=char and char:FindFirstChild("HumanoidRootPart")
     if root then log("Your position = "..tostring(root.Position),LOG_INFO) end
+end)
+
+local eggScanBtn=cfgBtn("🥚  Scan ALL eggs (debug)")
+eggScanBtn.Activated:Connect(function()
+    playClick()
+    log("=== EGG CONTAINER SCAN START ===",LOG_INFO)
+    local container = workspace:FindFirstChild("AreaEggSlotsClient")
+    if not container then
+        log("ERROR: AreaEggSlotsClient not found!",LOG_ERR)
+        return
+    end
+    
+    local eggs = container:GetChildren()
+    log("Found "..#eggs.." objects in AreaEggSlotsClient",LOG_INFO)
+    
+    for i, child in ipairs(eggs) do
+        if child:IsA("Model") then
+            log("["..i.."] Model: '"..child.Name.."'",LOG_INFO)
+            -- List parts inside
+            local parts = {}
+            for _, desc in ipairs(child:GetDescendants()) do
+                if desc:IsA("BasePart") then
+                    table.insert(parts, desc.Name)
+                end
+            end
+            if #parts > 0 then
+                log("    Parts: "..table.concat(parts, ", "),LOG_INFO)
+            end
+            -- List attributes
+            local attrs = child:GetAttributes()
+            if attrs and next(attrs) then
+                log("    Attributes: "..tostring(attrs),LOG_INFO)
+            end
+        end
+    end
+    log("=== EGG SCAN END ===",LOG_INFO)
 end)
 
 -- Size row

@@ -826,7 +826,7 @@ local function makeRarityBtn(text, rarity, xPos)
     local btn = Instance.new("TextButton")
     btn.Size = UDim2.new(0.24,-2,1,0)
     btn.Position = UDim2.new(xPos,xPos>0 and 2 or 0,0,0)
-    btn.BackgroundColor3 = RARITY_COLORS[rarity]
+    btn.BackgroundColor3 = Color3.fromRGB(80,80,80)  -- Start grey (unselected)
     btn.BorderSizePixel = 0
     btn.Text = text
     btn.Font = Enum.Font.FredokaOne
@@ -835,6 +835,8 @@ local function makeRarityBtn(text, rarity, xPos)
     btn.AutoButtonColor = false
     btn.Parent = rarityRow
     Instance.new("UICorner",btn).CornerRadius = UDim.new(0,5)
+    btn.Rarity = rarity
+    btn.IsSelected = false
     return btn
 end
 
@@ -842,16 +844,41 @@ local cosmicBtn = makeRarityBtn("Cosmic", "Cosmic", 0)
 local divineBtn = makeRarityBtn("Divine", "Divine", 0.25)
 local eternalBtn = makeRarityBtn("Eternal", "Eternal", 0.5)
 local secretBtn = makeRarityBtn("Secret", "Secret", 0.75)
+local rarityBtns = {cosmicBtn, divineBtn, eternalBtn, secretBtn}
+
+local function updateRarityButtonVisuals()
+    for _, btn in ipairs(rarityBtns) do
+        if btn.IsSelected then
+            btn.BackgroundColor3 = RARITY_COLORS[btn.Rarity]
+        else
+            btn.BackgroundColor3 = Color3.fromRGB(80,80,80)  -- Grey when unselected
+        end
+    end
+end
 
 local function selectEggsByRarity(rarity)
     SelectedEggs = {}
     local count = 0
+    
+    -- Update button states
+    for _, btn in ipairs(rarityBtns) do
+        if btn.Rarity:lower() == rarity:lower() then
+            btn.IsSelected = true
+        else
+            btn.IsSelected = false
+        end
+    end
+    
+    -- Select eggs matching rarity
     for _, egg in ipairs(AllScannedEggs) do
-        if rarity:lower() == "all" or egg.Rarity:lower() == rarity:lower() then
+        if egg.Rarity:lower() == rarity:lower() then
             SelectedEggs[egg.Uid] = true
             count = count + 1
         end
     end
+    
+    updateRarityButtonVisuals()
+    
     if count > 0 then
         log("Selected "..count.." eggs ("..rarity..")", LOG_OK)
         setAfVisual("on", "ON  •  "..count.." selected")
@@ -1039,88 +1066,139 @@ local function startAutoFarm()
     setAfVisual("running","Searching for selected eggs...")
 
     task.spawn(function()
-        -- Find closest selected egg
-        local targetEgg = nil
-        local targetPos = nil
-        local closestDist = 9999
-        
-        local char = Player.Character
-        local root = char and char:FindFirstChild("HumanoidRootPart")
-        
-        if not root then
-            log("AutoFarm: no root", LOG_ERR)
-            stopAutoFarm("no character"); return
-        end
-
-        for _, egg in ipairs(AllScannedEggs) do
-            if SelectedEggs[egg.Uid] then
-                local dist = (egg.Position - root.Position).Magnitude
-                if dist < closestDist then
-                    closestDist = dist
-                    targetEgg = egg
-                    targetPos = egg.Position
-                    log("AutoFarm: target = "..egg.Rarity.." '"..egg.Name.."' at distance "..math.floor(dist), LOG_INFO)
-                end
-            end
-        end
-
-        if not targetPos then
-            log("AutoFarm: no selected eggs in range", LOG_WARN)
-            stopAutoFarm("no selected"); return
-        end
-
-        log("AutoFarm: running to egg at ("..math.floor(targetPos.X)..","..math.floor(targetPos.Y)..","..math.floor(targetPos.Z)..")", LOG_OK)
-        
-        -- Run to the egg using the same speed system
-        local speedConn = RunService.Heartbeat:Connect(function()
-            if not AutoFarmRunning then return end
-            local c = Player.Character
-            local h = c and c:FindFirstChildOfClass("Humanoid")
-            if h then
-                pcall(function() h.WalkSpeed = RUN_SPEED end)
-            end
-        end)
-
-        local startTime = tick()
-        local TIMEOUT = 60
+        local eggsFarmed = 0
         
         while AutoFarmRunning and AutoFarmEnabled do
-            local c = Player.Character
-            local h = c and c:FindFirstChildOfClass("Humanoid")
-            local r = c and c:FindFirstChild("HumanoidRootPart")
+            -- Find closest selected egg
+            local targetEgg = nil
+            local targetPos = nil
+            local closestDist = 9999
             
-            if not h or not r then
-                speedConn:Disconnect()
-                log("AutoFarm: lost humanoid/root", LOG_ERR)
-                stopAutoFarm("lost root"); return
+            local char = Player.Character
+            local root = char and char:FindFirstChild("HumanoidRootPart")
+            
+            if not root then
+                log("AutoFarm: no root", LOG_ERR)
+                stopAutoFarm("no character"); return
+            end
+
+            for _, egg in ipairs(AllScannedEggs) do
+                if SelectedEggs[egg.Uid] then
+                    local dist = (egg.Position - root.Position).Magnitude
+                    if dist < closestDist then
+                        closestDist = dist
+                        targetEgg = egg
+                        targetPos = egg.Position
+                    end
+                end
+            end
+
+            if not targetPos then
+                log("AutoFarm: no selected eggs in range", LOG_WARN)
+                stopAutoFarm("no selected"); return
+            end
+
+            log("AutoFarm: found egg at distance "..math.floor(closestDist).." studs", LOG_INFO)
+            
+            -- Run to the egg using the same speed system
+            local speedConn = RunService.Heartbeat:Connect(function()
+                if not AutoFarmRunning then return end
+                local c = Player.Character
+                local h = c and c:FindFirstChildOfClass("Humanoid")
+                if h then
+                    pcall(function() h.WalkSpeed = RUN_SPEED end)
+                end
+            end)
+
+            local startTime = tick()
+            local TIMEOUT = 60
+            local eggReached = false
+            
+            while AutoFarmRunning and AutoFarmEnabled do
+                local c = Player.Character
+                local h = c and c:FindFirstChildOfClass("Humanoid")
+                local r = c and c:FindFirstChild("HumanoidRootPart")
+                
+                if not h or not r then
+                    speedConn:Disconnect()
+                    log("AutoFarm: lost humanoid/root", LOG_ERR)
+                    stopAutoFarm("lost root"); return
+                end
+                
+                if h.Health <= 0 then
+                    speedConn:Disconnect()
+                    log("AutoFarm: died", LOG_ERR)
+                    stopAutoFarm("dead"); return
+                end
+                
+                local dist = (r.Position - targetPos).Magnitude
+                
+                if dist <= ARRIVE_DIST then
+                    speedConn:Disconnect()
+                    log("AutoFarm: reached egg! Stealing it now...", LOG_OK)
+                    setAfVisual("running", "STEALING EGG...")
+                    
+                    -- Wait a moment for positioning
+                    task.wait(0.2)
+                    
+                    -- Try to steal the egg using ProximityPrompt interaction
+                    local eggModel = targetEgg.Model
+                    if eggModel then
+                        local promptFound = false
+                        for _, child in ipairs(eggModel:GetDescendants()) do
+                            if child:IsA("ProximityPrompt") then
+                                -- Trigger the prompt
+                                pcall(function()
+                                    child:InputHeld(game:GetService("UserInputService"))
+                                    task.wait(0.1)
+                                end)
+                                promptFound = true
+                                log("AutoFarm: ProximityPrompt triggered!", LOG_OK)
+                                break
+                            end
+                        end
+                        
+                        if not promptFound then
+                            -- Fallback: try to find and click proximity prompt
+                            local pp = eggModel:FindFirstChildOfClass("ProximityPrompt", true)
+                            if pp then
+                                pcall(function()
+                                    pp:InputHeld(game:GetService("UserInputService"))
+                                end)
+                                log("AutoFarm: ProximityPrompt found and triggered!", LOG_OK)
+                            else
+                                log("AutoFarm: no ProximityPrompt found on egg", LOG_WARN)
+                            end
+                        end
+                    end
+                    
+                    -- Wait for egg to be collected
+                    task.wait(1)
+                    eggsFarmed = eggsFarmed + 1
+                    log("AutoFarm: egg #"..eggsFarmed.." stolen! Moving to next...", LOG_OK)
+                    eggReached = true
+                    break
+                end
+                
+                if tick() - startTime > TIMEOUT then
+                    speedConn:Disconnect()
+                    log("AutoFarm: timeout after "..math.floor(tick()-startTime).."s", LOG_WARN)
+                    stopAutoFarm("timeout"); return
+                end
+                
+                pcall(function() h:MoveTo(targetPos) end)
+                task.wait(0.1)
             end
             
-            if h.Health <= 0 then
-                speedConn:Disconnect()
-                log("AutoFarm: died", LOG_ERR)
-                stopAutoFarm("dead"); return
-            end
-            
-            local dist = (r.Position - targetPos).Magnitude
-            
-            if dist <= ARRIVE_DIST then
-                speedConn:Disconnect()
-                log("AutoFarm: reached egg! Pick it up now.", LOG_OK)
-                setAfVisual("on", "REACHED — pick up egg!")
+            if not eggReached then
                 break
             end
             
-            if tick() - startTime > TIMEOUT then
-                speedConn:Disconnect()
-                log("AutoFarm: timeout after "..math.floor(tick()-startTime).."s", LOG_WARN)
-                stopAutoFarm("timeout"); return
-            end
-            
-            pcall(function() h:MoveTo(targetPos) end)
-            task.wait(0.1)
+            -- Small delay before searching for next egg
+            task.wait(0.5)
         end
 
-        stopAutoFarm("done")
+        stopAutoFarm("done - farmed "..eggsFarmed.." eggs")
     end)
 end
 
@@ -1174,6 +1252,15 @@ ProximityPromptService.PromptTriggered:Connect(function(prompt,player)
             log("AutoRun: not started (enabled=".. tostring(AutoRunEnabled)..")",LOG_WARN)
         end
     end)
+end)
+
+-- Auto-scan eggs on startup
+task.delay(1, function()
+    log("=== AUTO-SCANNING EGGS ON STARTUP ===", LOG_INFO)
+    scanAndDetectEggs()
+    if #AllScannedEggs > 0 then
+        log("✓ Found "..#AllScannedEggs.." eggs! Select rarity to farm.", LOG_OK)
+    end
 end)
 
 -- ======================================================

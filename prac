@@ -735,6 +735,82 @@ local function setAfVisual(state, txt)
     if txt then afStatus.Text = txt end
 end
 
+local function findEggsByType(eggType)
+    -- Standalone egg finder — scans AreaEggSlotsClient without YOKODU dependency
+    local container = workspace:FindFirstChild("AreaEggSlotsClient")
+    if not container then
+        log("AutoFarm: AreaEggSlotsClient not found!", LOG_ERR)
+        return {}
+    end
+
+    local eggList = {}
+    local typeKeywords = {
+        ["Secret"]  = { "secret", "shadowfirered", "mistical" },
+        ["Eternal"] = { "eternal", "timeless", "infinity" },
+        ["Divine"]  = { "divine", "deity", "godly", "celestial" },
+        ["Cosmic"]  = { "cosmic", "astral", "universal", "space" }
+    }
+    
+    local keywords = typeKeywords[eggType] or {}
+
+    for _, child in ipairs(container:GetChildren()) do
+        if child:IsA("Model") then
+            -- Try to match type by name first
+            local childNameLower = child.Name:lower()
+            local matchesType = false
+            
+            for _, keyword in ipairs(keywords) do
+                if string.find(childNameLower, keyword) then
+                    matchesType = true
+                    break
+                end
+            end
+            
+            -- If no match by name, try checking descendants for type hints
+            if not matchesType then
+                for _, desc in ipairs(child:GetDescendants()) do
+                    if desc:IsA("BasePart") then
+                        local descNameLower = desc.Name:lower()
+                        for _, keyword in ipairs(keywords) do
+                            if string.find(descNameLower, keyword) then
+                                matchesType = true
+                                break
+                            end
+                        end
+                        if matchesType then break end
+                    end
+                end
+            end
+
+            if matchesType then
+                -- Find a valid position for this egg
+                local pos = nil
+                if child.PrimaryPart then
+                    pos = child.PrimaryPart.Position
+                else
+                    for _, c in ipairs(child:GetChildren()) do
+                        if c:IsA("BasePart") then
+                            pos = c.Position
+                            break
+                        end
+                    end
+                end
+
+                if pos then
+                    table.insert(eggList, {
+                        Id = child.Name,
+                        DisplayName = child.Name,
+                        Model = child,
+                        Position = pos
+                    })
+                end
+            end
+        end
+    end
+
+    return eggList
+end
+
 local function stopAutoFarm(reason)
     AutoFarmRunning=false
     log("AutoFarm: STOPPED — "..(reason or "done"),LOG_WARN)
@@ -752,26 +828,20 @@ local function startAutoFarm()
     setAfVisual("running","Searching for "..SelectedEggType.."...")
 
     task.spawn(function()
-        -- Wait for YOKUDO system to load if not available yet
-        local attempts = 0
-        while not _G.YOKUDO_AutoFarm and attempts < 10 do
-            log("AutoFarm: waiting for YOKUDO system... ("..attempts..")", LOG_INFO)
-            task.wait(1)
-            attempts = attempts + 1
-        end
-        
-        if not _G.YOKUDO_AutoFarm then
-            log("AutoFarm: YOKUDO system not loaded!", LOG_ERR)
-            stopAutoFarm("YOKUDO not ready"); return
+        -- Scan eggs using standalone detector
+        local eggList = findEggsByType(SelectedEggType)
+        log("AutoFarm: found "..#eggList.." "..SelectedEggType.." eggs", LOG_INFO)
+
+        if #eggList == 0 then
+            log("AutoFarm: no "..SelectedEggType.." eggs found", LOG_WARN)
+            stopAutoFarm("no eggs"); return
         end
 
-        -- Scan eggs using the working YOKUDO system
-        local eggList = _G.YOKUDO_AutoFarm.ScanEggs()
-        log("AutoFarm: scanned "..#eggList.." eggs", LOG_INFO)
-
-        -- Find closest egg matching selected type
+        -- Find closest egg to player
         local targetEgg = nil
+        local targetPos = nil
         local closestDist = 9999
+        
         local char = Player.Character
         local root = char and char:FindFirstChild("HumanoidRootPart")
         
@@ -781,55 +851,21 @@ local function startAutoFarm()
         end
 
         for _, egg in ipairs(eggList) do
-            -- Check if egg category matches selected type (case-insensitive)
-            if egg.Category and string.find(egg.Category:lower(), SelectedEggType:lower()) then
-                if egg.Model then
-                    local primaryPart = egg.Model.PrimaryPart
-                    if not primaryPart then
-                        for _, child in ipairs(egg.Model:GetChildren()) do
-                            if child:IsA("BasePart") then
-                                primaryPart = child
-                                break
-                            end
-                        end
-                    end
-                    
-                    if primaryPart then
-                        local dist = (primaryPart.Position - root.Position).Magnitude
-                        if dist < closestDist then
-                            closestDist = dist
-                            targetEgg = egg.Model
-                            log("AutoFarm: found "..SelectedEggType.." '"..egg.DisplayName.."' at distance "..math.floor(dist), LOG_INFO)
-                        end
-                    end
-                end
+            local dist = (egg.Position - root.Position).Magnitude
+            if dist < closestDist then
+                closestDist = dist
+                targetEgg = egg
+                targetPos = egg.Position
+                log("AutoFarm: target = "..egg.DisplayName.." at distance "..math.floor(dist), LOG_INFO)
             end
         end
 
-        if not targetEgg then
-            log("AutoFarm: no "..SelectedEggType.." eggs found in "..#eggList.." eggs", LOG_WARN)
-            stopAutoFarm("no eggs"); return
+        if not targetPos then
+            log("AutoFarm: no valid target found", LOG_ERR)
+            stopAutoFarm("no target"); return
         end
 
-        -- Get egg position
-        local eggPos = nil
-        if targetEgg.PrimaryPart then
-            eggPos = targetEgg.PrimaryPart.Position
-        else
-            for _, child in ipairs(targetEgg:GetChildren()) do
-                if child:IsA("BasePart") then
-                    eggPos = child.Position
-                    break
-                end
-            end
-        end
-        
-        if not eggPos then
-            log("AutoFarm: egg has no position", LOG_ERR)
-            stopAutoFarm("no pos"); return
-        end
-
-        log("AutoFarm: running to egg at "..tostring(eggPos), LOG_OK)
+        log("AutoFarm: running to egg at ("..math.floor(targetPos.X)..","..math.floor(targetPos.Y)..","..math.floor(targetPos.Z)..")", LOG_OK)
         
         -- Run to the egg using the same speed system
         local speedConn = RunService.Heartbeat:Connect(function()
@@ -861,9 +897,9 @@ local function startAutoFarm()
                 stopAutoFarm("dead"); return
             end
             
-            local dist = (r.Position - eggPos).Magnitude
+            local dist = (r.Position - targetPos).Magnitude
             
-            if dist <= 5 then
+            if dist <= ARRIVE_DIST then
                 speedConn:Disconnect()
                 log("AutoFarm: reached egg! Pick it up now.", LOG_OK)
                 setAfVisual("on", "REACHED — pick up egg!")
@@ -872,11 +908,11 @@ local function startAutoFarm()
             
             if tick() - startTime > TIMEOUT then
                 speedConn:Disconnect()
-                log("AutoFarm: timeout", LOG_WARN)
+                log("AutoFarm: timeout after "..math.floor(tick()-startTime).."s", LOG_WARN)
                 stopAutoFarm("timeout"); return
             end
             
-            pcall(function() h:MoveTo(eggPos) end)
+            pcall(function() h:MoveTo(targetPos) end)
             task.wait(0.1)
         end
 
